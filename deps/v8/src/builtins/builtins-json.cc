@@ -6,6 +6,7 @@
 #include "src/builtins/builtins.h"
 #include "src/json/json-parser.h"
 #include "src/json/json-stringifier.h"
+#include "src/json/json-stringifier2.h"
 #include "src/logging/counters.h"
 #include "src/objects/objects-inl.h"
 
@@ -35,6 +36,15 @@ BUILTIN(JsonStringify) {
   Handle<Object> indent = args.atOrUndefined(isolate, 3);
   RETURN_RESULT_OR_FAILURE(isolate,
                            JsonStringify(isolate, object, replacer, indent));
+}
+
+BUILTIN(JsonStringify2) {
+  HandleScope scope(isolate);
+  Handle<Object> object = args.atOrUndefined(isolate, 1);
+  Handle<Object> replacer = args.atOrUndefined(isolate, 2);
+  Handle<Object> indent = args.atOrUndefined(isolate, 3);
+  RETURN_RESULT_OR_FAILURE(isolate,
+                           JsonStringify2(isolate, object, replacer, indent));
 }
 
 }  // namespace internal

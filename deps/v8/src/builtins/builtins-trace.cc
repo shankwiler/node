@@ -7,6 +7,7 @@
 #include "src/builtins/builtins.h"
 #include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/json/json-stringifier.h"
+#include "src/json/json-stringifier2.h"
 #include "src/logging/counters.h"
 #include "src/objects/objects-inl.h"
 

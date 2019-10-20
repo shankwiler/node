@@ -2734,6 +2734,8 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
                           2, false);
     SimpleInstallFunction(isolate_, json_object, "stringify",
                           Builtins::kJsonStringify, 3, true);
+    SimpleInstallFunction(isolate_, json_object, "stringify2",
+                      Builtins::kJsonStringify2, 3, true);
     InstallToStringTag(isolate_, json_object, "JSON");
   }
 
