@@ -1,0 +1,137 @@
+HeapObject::cast(*object).map().instance_type()
+
+return SerializeJSArray(Handle<JSArray>::cast(object), key);
+
+MaybeHandle<Object> JsonStringify calls MaybeHandle<Object> Stringify
+    Stringify calls Result SerializeObject
+        SerializeObject calls Result Serialize_
+
+How ParseJsonValue works if it's not an array or object:
+    while true:
+        value
+        while true:
+            value = create a new javascript value based on the string input
+        while true:
+            cont scope closeAndEscape(value) which retruns the value itself
+
+
+MaybeHandle<Object> Parse calls JsonParser::ParseJson
+    MaybeHandle<Object> JsonParser::ParseJson calls ParseJsonValue
+        MaybeHandle<Object> ParseJsonValue does the following
+
+ParseJsonValue:
+    cont = JsonContinuation(kreturn, 0)
+    while true:
+        while true:
+            switch peek():
+                case String:
+                    value = the whole string
+                    break
+                case Number:
+                    value = the whole number
+                    break
+                case LBRACE:
+                    if next token is RBRACE:
+                        value = new empty object
+                    else:
+                        cont_stack.push(cont)
+                    ...
+                case LBRACK:
+                    if next token is RBRACK:
+                        value = new empty array
+                    else:
+                        cont_stack.push(cont)
+                        cont =  JsonContinuation(kArrayElement, element_stack.size())
+                    continue
+                case true/false/null:
+                    value = the value
+                    break
+            break
+
+        while true:
+            switch cont.type():
+                case kReturn:
+                    return cont.scope.CloseAndEscape(value)
+                case kObjectProperty:
+                    ...
+                case kArrayElement:
+                    element_stack.push(value)
+                    if (next token is a comma) break;
+                    value = BuildJsonArray(cont, element_stack)
+                    ...
+
+ScanJsonPropertyKey:
+  if it's not an index:
+    
+
+
+
+EJSON = {};
+EJSON.clone = function (v) {
+  if (typeof v !== "object" || v === null)
+    return v;
+
+  if (v.length !== undefined) {
+
+    if (Array.isArray(v) || (v.callee && Object.prototype.toString.call(v) == '[object Arguments]')) {
+      var ret = new Array(v.length);
+      for (var i = 0; i < v.length; ++i)
+        ret[i] = EJSON.clone(v[i]);
+      return ret;
+    }
+
+    if (v instanceof Uint8Array) {
+      var ret = EJSON.newBinary(v.length);
+      for (var i = 0; i < v.length; ++i)
+        ret[i] = v[i];
+      return ret;
+    }
+
+  }
+
+  if (v.getDate && v instanceof Date)
+    return new Date(v.getTime());
+
+  if (v.compile && v instanceof RegExp)
+    return v;
+
+  if (v.clone && typeof v.clone === 'function')
+    return v.clone();
+
+  if (v.toJSONValue && EJSON._isCustomType(v))
+    return EJSON.fromJSONValue(EJSON.clone(EJSON.toJSONValue(v)), true);
+
+  var ret = {};
+  for (var key in v)
+    ret[key] = EJSON.clone(v[key]);
+
+  return ret;
+};
+
+const { performance } = require('perf_hooks');
+const arr = (() => {
+    const a = [1,2,3,4,5,6];
+    const b = [];
+    for (let i = 0; i < 10; ++i) {
+        b.push(a);
+    }
+    const c = [];
+    for (let i = 0; i < 10; ++i) {
+        c.push(JSON.parse(JSON.stringify(b)));
+    }
+    return c;
+})();
+
+const before = performance.now();
+for (let i = 0; i < 1000; ++i) {
+    EJSON.clone(arr);
+}
+const after = performance.now();
+
+const before2 = performance.now();
+for (let i = 0; i < 10000; ++i) {
+    JSON.stringify2(arr);
+}
+const after2 = performance.now();
+
+console.log(after - before, after2 - before2);

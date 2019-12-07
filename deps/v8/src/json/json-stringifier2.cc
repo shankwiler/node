@@ -30,7 +30,7 @@ class JSONStringifier2 {
                                                       Handle<Object> gap);
 
  private:
-  enum Result { UNCHANGED, SUCCESS, EXCEPTION };
+  public: enum Result { UNCHANGED, SUCCESS, EXCEPTION }; private:
 
   bool InitializeReplacer(Handle<Object> replacer);
   bool InitializeGap(Handle<Object> gap);
@@ -47,11 +47,11 @@ class JSONStringifier2 {
 
   // Serialize an array element.
   // The index may serve as argument for the toJSON function.
-  V8_INLINE Result SerializeElement(Isolate* isolate, Handle<Object> object,
+  public: V8_INLINE Result SerializeElement(Isolate* isolate, Handle<Object> object,
                                     int i) {
     return Serialize_<false>(object, false,
                              Handle<Object>(Smi::FromInt(i), isolate));
-  }
+  } private:
 
   // Serialize a object property.
   // The key may or may not be serialized depending on the property.
@@ -78,7 +78,7 @@ class JSONStringifier2 {
   Result SerializeJSPrimitiveWrapper(Handle<JSPrimitiveWrapper> object,
                                      Handle<Object> key);
 
-  V8_INLINE Result SerializeJSArray(Handle<JSArray> object, Handle<Object> key);
+  public: V8_INLINE Result SerializeJSArray(Handle<JSArray> object, Handle<Object> key); private:
   V8_INLINE Result SerializeJSObject(Handle<JSObject> object,
                                      Handle<Object> key);
 
@@ -120,10 +120,10 @@ class JSONStringifier2 {
   static const int kCircularErrorMessagePrefixCount = 2;
   static const int kCircularErrorMessagePostfixCount = 1;
 
-  Factory* factory() { return isolate_->factory(); }
+  public: Factory* factory() { return isolate_->factory(); } private:
 
-  Isolate* isolate_;
-  IncrementalStringBuilder builder_;
+  public: Isolate* isolate_; private:
+  public: IncrementalStringBuilder builder_; private:
   Handle<String> tojson_string_;
   Handle<FixedArray> property_list_;
   Handle<JSReceiver> replacer_function_;
@@ -137,10 +137,485 @@ class JSONStringifier2 {
   static const char* const JsonEscapeTable;
 };
 
+struct JsonContinuation {
+  enum Type : uint8_t { kReturn, kObjectProperty, kArrayElement };
+  JsonContinuation(Isolate* isolate, Type type, size_t index)
+      : scope(isolate),
+        type_(type),
+        index(static_cast<uint32_t>(index)),
+        max_index(0),
+        elements(0) {}
+
+  Type type() const { return static_cast<Type>(type_); }
+  void set_type(Type type) { type_ = static_cast<uint8_t>(type); }
+
+  HandleScope scope;
+  // Unfortunately GCC doesn't like packing Type in two bits.
+  uint32_t type_ : 2;
+  uint32_t index : 30;
+  uint32_t max_index;
+  uint32_t elements;
+};
+
+/*MaybeHandle<Object> JsonStringify2Old(Isolate* isolate, Handle<Object> object,
+                                  Handle<Object> replacer, Handle<Object> gap) {
+  //.
+  /* One true value std::vector<JsonContinuation> cont_stack;
+
+  cont_stack.reserve(16);
+
+  JsonContinuation cont(isolate, JsonContinuation::kReturn, 0);
+
+  Handle<Object> value;
+  JSONStringifier2 stringifier(isolate);//used only for the factory method
+  value = stringifier.factory()->true_value();
+  return cont.scope.CloseAndEscape(value); END COMMENT
+    
+}*/
+
+class JsonString final {
+ public:
+  JsonString()
+      : start_(0),
+        length_(0),
+        needs_conversion_(false),
+        internalize_(false),
+        has_escape_(false),
+        is_index_(false) {}
+
+  explicit JsonString(uint32_t index)
+      : index_(index),
+        length_(0),
+        needs_conversion_(false),
+        internalize_(false),
+        has_escape_(false),
+        is_index_(true) {}
+
+  JsonString(int start, int length, bool needs_conversion,
+             bool needs_internalization, bool has_escape)
+      : start_(start),
+        length_(length),
+        needs_conversion_(needs_conversion),
+        internalize_(needs_internalization ||
+                     length_ <= kMaxInternalizedStringValueLength),
+        has_escape_(has_escape),
+        is_index_(false) {}
+
+  bool internalize() const {
+    DCHECK(!is_index_);
+    return internalize_;
+  }
+
+  bool needs_conversion() const {
+    DCHECK(!is_index_);
+    return needs_conversion_;
+  }
+
+  bool has_escape() const {
+    DCHECK(!is_index_);
+    return has_escape_;
+  }
+
+  int start() const {
+    DCHECK(!is_index_);
+    return start_;
+  }
+
+  int length() const {
+    DCHECK(!is_index_);
+    return length_;
+  }
+
+  uint32_t index() const {
+    DCHECK(is_index_);
+    return index_;
+  }
+
+  bool is_index() const { return is_index_; }
+
+ private:
+  static const int kMaxInternalizedStringValueLength = 10;
+
+  union {
+    const int start_;
+    const uint32_t index_;
+  };
+  const int length_;
+  const bool needs_conversion_ : 1;
+  const bool internalize_ : 1;
+  const bool has_escape_ : 1;
+  const bool is_index_ : 1;
+};
+
+struct JsonContinuation {
+  enum Type : uint8_t { kReturn, kObjectProperty, kArrayElement };
+  JsonContinuation(Isolate* isolate, Type type, size_t index)
+      : scope(isolate),
+        type_(type),
+        index(static_cast<uint32_t>(index)),
+        max_index(0),
+        elements(0) {}
+
+  Type type() const { return static_cast<Type>(type_); }
+  void set_type(Type type) { type_ = static_cast<uint8_t>(type); }
+
+  HandleScope scope;
+  // Unfortunately GCC doesn't like packing Type in two bits.
+  uint32_t type_ : 2;
+  uint32_t index : 30;
+  uint32_t max_index;
+  uint32_t elements;
+};
+
+struct JsonProperty {
+  JsonProperty() { UNREACHABLE(); }
+  explicit JsonProperty(const JsonString& string) : string(string) {}
+
+  JsonString string;
+  Handle<Object> value;
+};
+
+template <typename Char>
+Handle<Object> BuildJsonObject(
+    const JsonContinuation& cont,
+    const std::vector<JsonProperty>& property_stack, Handle<Map> feedback) {
+  size_t start = cont.index;
+  int length = static_cast<int>(property_stack.size() - start);
+  int named_length = length - cont.elements;
+
+  Handle<Map> initial_map = factory()->ObjectLiteralMapFromCache(
+      isolate_->native_context(), named_length);
+
+  Handle<Map> map = initial_map;
+
+  Handle<FixedArrayBase> elements = factory()->empty_fixed_array();
+
+  // First store the elements.
+  if (cont.elements > 0) {
+    // Store as dictionary elements if that would use less memory.
+    if (ShouldConvertToSlowElements(cont.elements, cont.max_index + 1)) {
+      Handle<NumberDictionary> elms =
+          NumberDictionary::New(isolate_, cont.elements);
+      for (int i = 0; i < length; i++) {
+        const JsonProperty& property = property_stack[start + i];
+        if (!property.string.is_index()) continue;
+        uint32_t index = property.string.index();
+        Handle<Object> value = property.value;
+        elms = NumberDictionary::Set(isolate_, elms, index, value);
+      }
+      map = Map::AsElementsKind(isolate_, map, DICTIONARY_ELEMENTS);
+      elements = elms;
+    } else {
+      Handle<FixedArray> elms =
+          factory()->NewFixedArrayWithHoles(cont.max_index + 1);
+      DisallowHeapAllocation no_gc;
+      WriteBarrierMode mode = elms->GetWriteBarrierMode(no_gc);
+      DCHECK_EQ(HOLEY_ELEMENTS, map->elements_kind());
+
+      for (int i = 0; i < length; i++) {
+        const JsonProperty& property = property_stack[start + i];
+        if (!property.string.is_index()) continue;
+        uint32_t index = property.string.index();
+        Handle<Object> value = property.value;
+        elms->set(static_cast<int>(index), *value, mode);
+      }
+      elements = elms;
+    }
+  }
+
+  int feedback_descriptors =
+      (feedback.is_null() ||
+       feedback->elements_kind() != map->elements_kind() ||
+       feedback->instance_size() != map->instance_size())
+          ? 0
+          : feedback->NumberOfOwnDescriptors();
+
+  int i;
+  int descriptor = 0;
+  int new_mutable_double = 0;
+  for (i = 0; i < length; i++) {
+    const JsonProperty& property = property_stack[start + i];
+    if (property.string.is_index()) continue;
+    Handle<String> expected;
+    Handle<Map> target;
+    if (descriptor < feedback_descriptors) {
+      expected = handle(
+          String::cast(feedback->instance_descriptors().GetKey(descriptor)),
+          isolate_);
+    } else {
+      DisallowHeapAllocation no_gc;
+      TransitionsAccessor transitions(isolate(), *map, &no_gc);
+      expected = transitions.ExpectedTransitionKey();
+      if (!expected.is_null()) {
+        // Directly read out the target while reading out the key, otherwise it
+        // might die while building the string below.
+        target = TransitionsAccessor(isolate(), *map, &no_gc)
+                     .ExpectedTransitionTarget();
+      }
+    }
+
+    Handle<String> key = MakeString(property.string, expected);
+    if (key.is_identical_to(expected)) {
+      if (descriptor < feedback_descriptors) target = feedback;
+    } else {
+      if (descriptor < feedback_descriptors) {
+        map = ParentOfDescriptorOwner(isolate_, map, feedback, descriptor);
+        feedback_descriptors = 0;
+      }
+      if (!TransitionsAccessor(isolate(), map)
+               .FindTransitionToField(key)
+               .ToHandle(&target)) {
+        break;
+      }
+    }
+
+    Handle<Object> value = property.value;
+
+    PropertyDetails details =
+        target->instance_descriptors().GetDetails(descriptor);
+    Representation expected_representation = details.representation();
+
+    if (!value->FitsRepresentation(expected_representation)) {
+      Representation representation = value->OptimalRepresentation(isolate());
+      representation = representation.generalize(expected_representation);
+      if (!expected_representation.CanBeInPlaceChangedTo(representation)) {
+        map = ParentOfDescriptorOwner(isolate_, map, target, descriptor);
+        break;
+      }
+      Handle<FieldType> value_type =
+          value->OptimalType(isolate(), representation);
+      Map::GeneralizeField(isolate(), target, descriptor, details.constness(),
+                           representation, value_type);
+    } else if (expected_representation.IsHeapObject() &&
+               !target->instance_descriptors()
+                    .GetFieldType(descriptor)
+                    .NowContains(value)) {
+      Handle<FieldType> value_type =
+          value->OptimalType(isolate(), expected_representation);
+      Map::GeneralizeField(isolate(), target, descriptor, details.constness(),
+                           expected_representation, value_type);
+    } else if (!FLAG_unbox_double_fields &&
+               expected_representation.IsDouble() && value->IsSmi()) {
+      new_mutable_double++;
+    }
+
+    DCHECK(target->instance_descriptors()
+               .GetFieldType(descriptor)
+               .NowContains(value));
+    map = target;
+    descriptor++;
+  }
+
+  // Fast path: Write all transitioned named properties.
+  if (i == length && descriptor < feedback_descriptors) {
+    map = ParentOfDescriptorOwner(isolate_, map, map, descriptor);
+  }
+
+  // Preallocate all mutable heap numbers so we don't need to allocate while
+  // setting up the object. Otherwise verification of that object may fail.
+  Handle<ByteArray> mutable_double_buffer;
+  // Allocate enough space so we can double-align the payload.
+  const int kMutableDoubleSize = sizeof(double) * 2;
+  STATIC_ASSERT(HeapNumber::kSize <= kMutableDoubleSize);
+  if (new_mutable_double > 0) {
+    mutable_double_buffer =
+        factory()->NewByteArray(kMutableDoubleSize * new_mutable_double);
+  }
+
+  Handle<JSObject> object = initial_map->is_dictionary_map()
+                                ? factory()->NewSlowJSObjectFromMap(map)
+                                : factory()->NewJSObjectFromMap(map);
+  object->set_elements(*elements);
+
+  {
+    descriptor = 0;
+    DisallowHeapAllocation no_gc;
+    WriteBarrierMode mode = object->GetWriteBarrierMode(no_gc);
+    Address mutable_double_address =
+        mutable_double_buffer.is_null()
+            ? 0
+            : reinterpret_cast<Address>(
+                  mutable_double_buffer->GetDataStartAddress());
+    Address filler_address = mutable_double_address;
+    if (IsAligned(mutable_double_address, kDoubleAlignment)) {
+      mutable_double_address += kTaggedSize;
+    } else {
+      filler_address += HeapNumber::kSize;
+    }
+    for (int j = 0; j < i; j++) {
+      const JsonProperty& property = property_stack[start + j];
+      if (property.string.is_index()) continue;
+      PropertyDetails details =
+          map->instance_descriptors().GetDetails(descriptor);
+      Object value = *property.value;
+      FieldIndex index = FieldIndex::ForDescriptor(*map, descriptor);
+      descriptor++;
+
+      if (details.representation().IsDouble()) {
+        if (object->IsUnboxedDoubleField(index)) {
+          uint64_t bits;
+          if (value.IsSmi()) {
+            bits = bit_cast<uint64_t>(static_cast<double>(Smi::ToInt(value)));
+          } else {
+            DCHECK(value.IsHeapNumber());
+            bits = HeapNumber::cast(value).value_as_bits();
+          }
+          object->RawFastDoublePropertyAsBitsAtPut(index, bits);
+          continue;
+        }
+
+        if (value.IsSmi()) {
+          if (kTaggedSize != kDoubleSize) {
+            // Write alignment filler.
+            HeapObject filler = HeapObject::FromAddress(filler_address);
+            filler.set_map_after_allocation(
+                *factory()->one_pointer_filler_map());
+            filler_address += kMutableDoubleSize;
+          }
+
+          uint64_t bits =
+              bit_cast<uint64_t>(static_cast<double>(Smi::ToInt(value)));
+          // Allocate simple heapnumber with immortal map, with non-pointer
+          // payload, so we can skip notifying object layout change.
+
+          HeapObject hn = HeapObject::FromAddress(mutable_double_address);
+          hn.set_map_after_allocation(*factory()->heap_number_map());
+          HeapNumber::cast(hn).set_value_as_bits(bits);
+          value = hn;
+          mutable_double_address += kMutableDoubleSize;
+        } else {
+          DCHECK(value.IsHeapNumber());
+          HeapObject::cast(value).synchronized_set_map(
+              *factory()->heap_number_map());
+        }
+      }
+      object->RawFastInobjectPropertyAtPut(index, value, mode);
+    }
+    // Make all mutable HeapNumbers alive.
+    if (!mutable_double_buffer.is_null()) {
+#ifdef DEBUG
+      Address end =
+          reinterpret_cast<Address>(mutable_double_buffer->GetDataEndAddress());
+      DCHECK_EQ(Min(filler_address, mutable_double_address), end);
+      DCHECK_GE(filler_address, end);
+      DCHECK_GE(mutable_double_address, end);
+#endif
+      mutable_double_buffer->set_length(0);
+    }
+  }
+
+  // Slow path: define remaining named properties.
+  for (; i < length; i++) {
+    HandleScope scope(isolate_);
+    const JsonProperty& property = property_stack[start + i];
+    if (property.string.is_index()) continue;
+    Handle<String> key = MakeString(property.string);
+#ifdef DEBUG
+    uint32_t index;
+    DCHECK(!key->AsArrayIndex(&index));
+#endif
+    Handle<Object> value = property.value;
+    LookupIterator it(isolate_, object, key, object, LookupIterator::OWN);
+    JSObject::DefineOwnPropertyIgnoreAttributes(&it, value, NONE).Check();
+  }
+
+  return object;
+}
+
+
 MaybeHandle<Object> JsonStringify2(Isolate* isolate, Handle<Object> object,
                                   Handle<Object> replacer, Handle<Object> gap) {
+  // TODO Stack limit handling as in Serialize_
+  //return object;
+
+  if (object->IsSmi()) {
+    return object;
+  }
+  switch (HeapObject::cast(*object).map().instance_type()) {
+    case HEAP_NUMBER_TYPE:
+      return object;
+    case BIGINT_TYPE:
+      return object;
+    case ODDBALL_TYPE:
+      return object;
+    case JS_ARRAY_TYPE: {
+      // TODO Fast version
+      /*JSONStringifier2 stringifier(isolate);
+      stringifier.SerializeJSArray(Handle<JSArray>::cast(object), (stringifier.factory())->empty_string());
+      return stringifier.builder_.Finish();*/
+      Handle<JSArray> array = Handle<JSArray>::cast(object);
+      //return object; WORKS
+
+      uint32_t length = 0;
+      CHECK(array->length().ToArrayLength(&length));
+      //return object; WORKS
+
+      JSONStringifier2 stringifier(isolate); // needed just for stringifier.factory
+      Handle<JSArray> array2 = stringifier.factory()->NewJSArray(PACKED_SMI_ELEMENTS, length, length);
+
+
+      DisallowHeapAllocation no_gc;
+      FixedArray elements = FixedArray::cast(array2->elements());
+      WriteBarrierMode mode = elements.GetWriteBarrierMode(no_gc);
+
+      JSONStringifier2 tmp(isolate);
+      for (uint32_t i = 0; i < length; i++) {
+        Handle<Object> element;
+        Handle<JSReceiver> object2 = Handle<JSReceiver>::cast(object);
+        // Figure out this return on exception thing
+        // ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+        //   isolate, element, JSReceiver::GetElement(isolate, array, i),
+        //   tmp.EXCEPTION);
+
+        // TODO^ for above^
+        
+        // ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+        //   isolate, element, JSReceiver::GetElement(isolate, object2, i),
+        //   JSONStringifier2::EXCEPTION);
+        (JSReceiver::GetElement(isolate, object2, i)).ToHandle(&element);
+
+        Handle<Object> element2;
+        JsonStringify2(isolate, element, replacer, gap).ToHandle(&element2);
+
+        elements.set(i, *element2, mode);
+        //return object; WORKS
+        //JSONStringifier2::Result result = tmp.SerializeElement(isolate, element, length - 1 - i);
+        // return object; WORKS NOW AFTER FIX
+        //if (result == JSONStringifier2::SUCCESS) continue;
+        //return object; DOESNT WORK
+      }
+
+      return array2;
+    }
+    case JS_PRIMITIVE_WRAPPER_TYPE:
+      // TODO
+    default:
+      if (object->IsString() || object->IsCallable()) {
+        return object;
+      }
+      if (object->IsJSProxy()) {
+        // TODO
+      }
+      // TODO SerializeJSObject
+      JSONStringifier2 stringifier(isolate);
+      Handle<JSFunction> object_constructor_((stringifier.isolate_)->object_function());
+      JsonContinuation cont = JsonContinuation(stringifier.isolate_, JsonContinuation::kObjectProperty, 0);
+      std::vector<JsonProperty> property_stack;
+      JsonString
+      //JsonProperty(JsonString)
+      property_stack.emplace_back()
+      Handle<Object> obj = BuildJsonObject(cont, );
+
+      return stringifier.factory()->NewJSObject(object_constructor_);
+  }
+
+  // Should never reach this point
+  return object;
+  
+  /*return object;
+  return Handle<String>::cast(object);
   JSONStringifier2 stringifier(isolate);
-  return stringifier.Stringify(object, replacer, gap);
+  return stringifier.Stringify(object, replacer, gap);*/
 }
 
 // Translation table to escape Latin1 characters.
@@ -511,6 +986,7 @@ Handle<String> JSONStringifier2::ConstructCircularStructureErrorMessage(
   return result;
 }
 
+// TODO: Handle deferred_string_key. What does it do?
 template <bool deferred_string_key>
 JSONStringifier2::Result JSONStringifier2::Serialize_(Handle<Object> object,
                                                     bool comma,
